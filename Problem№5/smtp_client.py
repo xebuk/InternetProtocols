@@ -1,30 +1,27 @@
-import smtplib
-import configparser
-import os
+from getpass import getpass
+from smtplib import SMTP, SMTP_SSL
+from configparser import ConfigParser
+from os.path import isfile, basename
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
 from email.header import Header
-import mimetypes
+from mimetypes import guess_type
 
-# Чтение конфигурационного файла
-config = configparser.ConfigParser()
-config.read('config.ini')
+config = ConfigParser()
+config.read('config.ini', encoding="utf-8")
 
 recipients = [r.strip() for r in config.get('settings', 'recipients').split(',')]
 subject = config.get('settings', 'subject')
 attachments = [a.strip() for a in config.get('settings', 'attachments').split(',')]
 
-# Чтение тела письма
 with open('message.txt', 'r', encoding='utf-8') as f:
     body = f.read()
 
-# Запрос данных отправителя
 sender_email = input("Введите ваш email: ")
-password = input("Введите пароль: ")
+password = getpass("Введите пароль: ")
 
-# Определение SMTP сервера
 domain = sender_email.split('@')[-1].lower()
 smtp_servers = {
     'gmail.com': {'host': 'smtp.gmail.com', 'port': 587, 'ssl': False},
@@ -35,11 +32,10 @@ smtp_servers = {
 if domain not in smtp_servers:
     supported = ", ".join(smtp_servers.keys())
     print(f"Домен {domain} не поддерживается. Поддерживаемые домены: {supported}.")
-    exit()
+    exit(0)
 
 server_info = smtp_servers[domain]
 
-# Создание сообщения
 msg = MIMEMultipart()
 msg['From'] = sender_email
 msg['To'] = ', '.join(recipients)
@@ -47,13 +43,12 @@ msg['Subject'] = Header(subject, 'utf-8')
 
 msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
-# Добавление вложений
 for file in attachments:
-    if not os.path.isfile(file):
+    if not isfile(file):
         print(f"Ошибка: файл {file} не найден.")
         exit()
 
-    mime_type, _ = mimetypes.guess_type(file)
+    mime_type, _ = guess_type(file)
     if mime_type is None:
         mime_type = 'application/octet-stream'
     main_type, sub_type = mime_type.split('/', 1)
@@ -66,23 +61,23 @@ for file in attachments:
             part.set_payload(f.read())
             encoders.encode_base64(part)
 
-    filename = Header(os.path.basename(file), 'utf-8').encode()
+    filename = Header(basename(file), 'utf-8').encode()
     part.add_header('Content-Disposition', 'attachment', filename=filename)
     msg.attach(part)
 
-# Отправка письма
 try:
     if server_info['ssl']:
-        server = smtplib.SMTP_SSL(server_info['host'], server_info['port'])
+        server = SMTP_SSL(server_info['host'], server_info['port'], timeout=5)
     else:
-        server = smtplib.SMTP(server_info['host'], server_info['port'])
+        server = SMTP(server_info['host'], server_info['port'], timeout=5)
         server.starttls()
 
     server.login(sender_email, password)
     server.sendmail(sender_email, recipients, msg.as_string())
-    print("✅ Письмо успешно отправлено!")
+
+    print("Письмо успешно отправлено!")
 except Exception as e:
-    print(f"❌ Ошибка при отправке: {str(e)}")
+    print(f"Ошибка при отправке: {str(e)}")
 finally:
     if 'server' in locals():
         server.quit()
