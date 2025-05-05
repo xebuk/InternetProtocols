@@ -4,6 +4,8 @@ import time
 import signal
 import sys
 import pickle
+from typing import Any
+
 import dns.message
 import dns.query
 import dns.rdatatype
@@ -13,54 +15,60 @@ import dns.rrset
 
 class DNSCache:
     def __init__(self):
-        self.cache = {}  # Key: (name, rtype), Value: list of (data, ttl, timestamp)
+        self.cache: dict[Any, dict[Any, Any]] = dict()
+        self.on_deletion_entries = set()
+        self.on_deletion_keys = set()
         self.lock = threading.Lock()
 
     def add_record(self, name, rtype, data, ttl):
         with self.lock:
             key = (name.lower(), rtype)
-            expiry = time.time() + ttl
-            if key not in self.cache:
-                self.cache[key] = []
-            for entry in self.cache[key]:
-                if entry[0] == data:
-                    entry[1] = ttl
-                    entry[2] = expiry
-                    return
-            self.cache[key].append([data, ttl, expiry])
+            expired = time.time() + ttl
+            if key not in self.cache.keys():
+                self.cache[key] = dict()
+            self.cache[key][data] = (ttl, expired)
 
     def get_records(self, name, rtype):
         key = (name.lower(), rtype)
         current_time = time.time()
         with self.lock:
-            if key not in self.cache:
+            if key not in self.cache.keys():
                 return None
             valid = []
             expired = []
-            for entry in self.cache[key]:
-                if entry[2] > current_time:
-                    valid.append((entry[0], entry[1]))
+            for entry in self.cache[key].items():
+                if entry[1][1] > current_time:
+                    valid.append((entry[0], entry[1][0]))
                 else:
-                    expired.append(entry)
+                    expired.append(entry[0])
             for e in expired:
-                self.cache[key].remove(e)
+                self.cache[key].pop(e)
             if not self.cache[key]:
-                del self.cache[key]
+                self.cache.pop(key)
             return valid if valid else None
 
     def cleanup(self):
         current_time = time.time()
         with self.lock:
-            for key in list(self.cache.keys()):
-                self.cache[key] = [entry for entry in self.cache[key] if entry[2] > current_time]
+            for key in self.cache.keys():
+                for entry in self.cache[key].items():
+                    if entry[1][1] < current_time:
+                        self.on_deletion_entries.add(entry[0])
+                for entry in self.on_deletion_entries:
+                    self.cache[key].pop(entry)
+                self.on_deletion_entries.clear()
+
                 if not self.cache[key]:
-                    del self.cache[key]
+                    self.on_deletion_keys.add(key)
+            for key in self.on_deletion_keys:
+                self.cache.pop(key)
+            self.on_deletion_keys.clear()
 
     def save(self, filename):
         with self.lock:
-            data = {k: [(entry[0], entry[1], entry[2]) for k, v in self.cache.items() for entry in v]}
             with open(filename, 'wb') as f:
-                pickle.dump(data, f)
+                pickle.dump(self.cache.copy(), f)
+            print("Кэш был сохранен")
 
     def load(self, filename):
         with self.lock:
@@ -69,12 +77,14 @@ class DNSCache:
                     data = pickle.load(f)
                     current_time = time.time()
                     for (name, rtype), entries in data.items():
-                        for entry in entries:
-                            data_entry, ttl, expiry = entry
-                            if expiry > current_time:
-                                self.add_record(name, rtype, data_entry, ttl)
+                        for entry in entries.items():
+                            if entry[1][1] > current_time:
+                                self.add_record(name, rtype, entry[0], entry[1][0])
+                print("Kэш был загружен")
             except FileNotFoundError:
-                pass
+                print("Файл не был найден")
+            except Exception as e:
+                print(f"Произошла ошибка: {e}")
 
 
 cache = DNSCache()
@@ -109,11 +119,11 @@ def handle_query(data, addr, sock):
                         cache.add_record(name, rtype, data_entry, rrset.ttl)
             sock.sendto(response.to_wire(), addr)
     except Exception as e:
-        print(f"Error handling query: {e}")
+        print(f"Ошибка обработки запроса: {e}")
 
 
 def recursive_resolve(qname, qtype):
-    nameservers = ['198.41.0.4', '199.9.14.201', '192.33.4.12', '199.7.91.13']
+    nameservers = ['198.41.0.4', '199.9.14.201', '192.33.4.12', '199.7.91.13']  # Корневые сервера A-D
     depth = 0
     while depth < 15:
         for ns in nameservers.copy():
@@ -133,11 +143,11 @@ def recursive_resolve(qname, qtype):
                                         for addr in add_rrset:
                                             if addr.rdtype == dns.rdatatype.A:
                                                 new_ns.append(addr.address)
-                    nameservers = new_ns if new_ns else ['198.41.0.4']
+                    nameservers = new_ns if new_ns else []
                     depth += 1
                     break
             except Exception as e:
-                print(f"Query failed: {e}")
+                print(f"Запрос провалился: {e}")
                 nameservers.remove(ns)
     return None
 
@@ -166,6 +176,7 @@ def main():
 
     while True:
         data, addr = sock.recvfrom(512)
+        print("Получил запрос")
         threading.Thread(target=handle_query, args=(data, addr, sock)).start()
 
 
